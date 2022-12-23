@@ -73,7 +73,17 @@ An abstract type that should be subtyped for users creating JuMP extensions.
 """
 abstract type AbstractModel end
 
-mutable struct Model <: AbstractModel
+"""
+    value_type(::Type{<:Union{AbstractModel,AbstractVariableRef}})
+
+Return the return type of [`value`](@ref) for variables of that model. It
+defaults to `Float64` if it is not implemented.
+"""
+function value_type end
+
+value_type(::Type{<:AbstractModel}) = Float64
+
+mutable struct GenericModel{T} <: AbstractModel
     # In MANUAL and AUTOMATIC modes, CachingOptimizer.
     # In DIRECT mode, will hold an AbstractOptimizer.
     moi_backend::MOI.AbstractOptimizer
@@ -84,7 +94,7 @@ mutable struct Model <: AbstractModel
     # same bridge may be added many times so we store them in a `Set` instead
     # of, e.g., a `Vector`.
     bridge_types::Set{Any}
-    # Hook into a solve call...function of the form f(m::Model; kwargs...),
+    # Hook into a solve call...function of the form f(m::GenericModel; kwargs...),
     # where kwargs get passed along to subsequent solve calls.
     optimize_hook::Any
     # TODO: Document.
@@ -105,7 +115,9 @@ mutable struct Model <: AbstractModel
     set_string_names_on_creation::Bool
 end
 
-function Base.getproperty(model::Model, name::Symbol)
+value_type(::Type{GenericModel{T}}) where {T} = T
+
+function Base.getproperty(model::GenericModel, name::Symbol)
     if name == :nlp_data
         error(
             "The internal field `.nlp_data` was removed from `Model` in JuMP " *
@@ -123,21 +135,23 @@ function Base.getproperty(model::Model, name::Symbol)
 end
 
 """
-    Model()
+    GenericModel{T}()
 
-Return a new JuMP model without any optimizer; the model is stored in
-a cache.
+Return a new JuMP model of value type `T` without any optimizer; the model is
+stored in a cache.
 
 Use [`set_optimizer`](@ref) to set the optimizer before calling
 [`optimize!`](@ref).
 """
-function Model()
+function GenericModel{T}() where {T}
     caching_opt = MOIU.CachingOptimizer(
-        MOIU.UniversalFallback(MOIU.Model{Float64}()),
+        MOIU.UniversalFallback(MOIU.Model{T}()),
         MOIU.AUTOMATIC,
     )
-    return direct_model(caching_opt)
+    return direct_model(caching_opt, T)
 end
+
+const Model = GenericModel{Float64}
 
 """
     Model(optimizer_factory; add_bridges::Bool = true)
@@ -161,14 +175,17 @@ env = Gurobi.Env()
 model = Model(() -> Gurobi.Optimizer(env); add_bridges = false)
 ```
 """
-function Model((@nospecialize optimizer_factory); add_bridges::Bool = true)
-    model = Model()
+function GenericModel{T}(
+    (@nospecialize optimizer_factory);
+    add_bridges::Bool = true,
+) where {T}
+    model = GenericModel{T}()
     set_optimizer(model, optimizer_factory; add_bridges = add_bridges)
     return model
 end
 
 """
-    direct_model(backend::MOI.ModelLike)
+    direct_model(backend::MOI.ModelLike, T::Type = Float64)
 
 Return a new JuMP model using [`backend`](@ref) to store the model and solve it.
 
@@ -190,9 +207,9 @@ in mind the following implications of creating models using this *direct* mode:
 * The optimizer used cannot be changed the model is constructed.
 * The model created cannot be copied.
 """
-function direct_model(backend::MOI.ModelLike)
+function direct_model(backend::MOI.ModelLike, T::Type = Float64)
     @assert MOI.is_empty(backend)
-    return Model(
+    return GenericModel{T}(
         backend,
         Dict{MOI.ConstraintIndex,AbstractShape}(),
         Set{Any}(),
@@ -235,10 +252,10 @@ function direct_model(factory::MOI.OptimizerWithAttributes)
     return direct_model(optimizer)
 end
 
-Base.broadcastable(model::Model) = Ref(model)
+Base.broadcastable(model::GenericModel) = Ref(model)
 
 """
-    backend(model::Model)
+    backend(model::GenericModel)
 
 Return the lower-level MathOptInterface model that sits underneath JuMP. This
 model depends on which operating mode JuMP is in (see [`mode`](@ref)).
@@ -262,10 +279,10 @@ the innermost optimizer, see [`unsafe_backend`](@ref). Alternatively, use
 
 See also: [`unsafe_backend`](@ref).
 """
-backend(model::Model) = model.moi_backend
+backend(model::GenericModel) = model.moi_backend
 
 """
-    unsafe_backend(model::Model)
+    unsafe_backend(model::GenericModel)
 
 Return the innermost optimizer associated with the JuMP model `model`.
 
@@ -323,7 +340,7 @@ model = direct_model(HiGHS.Optimizer())
 highs = backend(model)  # No need to call `attach_optimizer`.
 ```
 """
-unsafe_backend(model::Model) = unsafe_backend(backend(model))
+unsafe_backend(model::GenericModel) = unsafe_backend(backend(model))
 
 function unsafe_backend(model::MOIU.CachingOptimizer)
     if MOIU.state(model) == MOIU.NO_OPTIMIZER
@@ -348,19 +365,19 @@ function _moi_mode(model::MOIU.CachingOptimizer)
 end
 
 """
-    mode(model::Model)
+    mode(model::GenericModel)
 
 Return the [`ModelMode`](@ref) ([`DIRECT`](@ref), [`AUTOMATIC`](@ref), or
 [`MANUAL`](@ref)) of `model`.
 """
-function mode(model::Model)
+function mode(model::GenericModel)
     # The type of `backend(model)` is not type-stable, so we use a function
     # barrier (`_moi_mode`) to improve performance.
     return _moi_mode(backend(model))
 end
 
 """
-    set_string_names_on_creation(model::Model, value::Bool)
+    set_string_names_on_creation(model::GenericModel, value::Bool)
 
 Set the default argument of the `set_string_name` keyword in the
 [`@variable`](@ref) and [`@constraint`](@ref) macros to `value`. This is used to
@@ -371,12 +388,14 @@ By default, `value` is `true`. However, for larger models calling
 `set_string_names_on_creation(model, false)` can improve performance at the cost
 of reducing the readability of printing and solver log messages.
 """
-function set_string_names_on_creation(model::Model, value::Bool)
+function set_string_names_on_creation(model::GenericModel, value::Bool)
     model.set_string_names_on_creation = value
     return
 end
 
-set_string_names_on_creation(model::Model) = model.set_string_names_on_creation
+function set_string_names_on_creation(model::GenericModel)
+    return model.set_string_names_on_creation
+end
 
 set_string_names_on_creation(::AbstractModel) = true
 
@@ -387,7 +406,7 @@ function _moi_bridge_constraints(model::MOIU.CachingOptimizer)
 end
 
 """
-    bridge_constraints(model::Model)
+    bridge_constraints(model::GenericModel)
 
 When in direct mode, return `false`.
 
@@ -396,21 +415,26 @@ optimizer is set and unsupported constraints are automatically bridged
 to equivalent supported constraints when an appropriate transformation is
 available.
 """
-function bridge_constraints(model::Model)
+function bridge_constraints(model::GenericModel)
     # The type of `backend(model)` is not type-stable, so we use a function
     # barrier (`_moi_bridge_constraints`) to improve performance.
     return _moi_bridge_constraints(backend(model))
 end
 
 function _moi_add_bridge(
-    model::Nothing,
-    BridgeType::Type{<:MOI.Bridges.AbstractBridge},
+    ::Nothing,
+    ::Type{<:MOI.Bridges.AbstractBridge},
+    ::Type,
 )
     # No optimizer is attached, the bridge will be added when one is attached
     return
 end
 
-function _moi_add_bridge(::MOI.ModelLike, ::Type{<:MOI.Bridges.AbstractBridge})
+function _moi_add_bridge(
+    ::MOI.ModelLike,
+    ::Type{<:MOI.Bridges.AbstractBridge},
+    ::Type,
+)
     return error(
         "Cannot add bridge if `add_bridges` was set to `false` in the `Model` ",
         "constructor.",
@@ -420,22 +444,24 @@ end
 function _moi_add_bridge(
     bridge_opt::MOI.Bridges.LazyBridgeOptimizer,
     BridgeType::Type{<:MOI.Bridges.AbstractBridge},
-)
-    MOI.Bridges.add_bridge(bridge_opt, BridgeType{Float64})
+    ::Type{T},
+) where {T}
+    MOI.Bridges.add_bridge(bridge_opt, BridgeType{T})
     return
 end
 
 function _moi_add_bridge(
     caching_opt::MOIU.CachingOptimizer,
     BridgeType::Type{<:MOI.Bridges.AbstractBridge},
-)
-    _moi_add_bridge(caching_opt.optimizer, BridgeType)
+    ::Type{T},
+) where {T}
+    _moi_add_bridge(caching_opt.optimizer, BridgeType, T)
     return
 end
 
 """
      add_bridge(
-        model::Model,
+        model::GenericModel,
         BridgeType::Type{<:MOI.Bridges.AbstractBridge},
     )
 
@@ -444,18 +470,18 @@ unsupported constraints into an equivalent formulation using only constraints
 supported by the optimizer.
 """
 function add_bridge(
-    model::Model,
+    model::GenericModel{T},
     BridgeType::Type{<:MOI.Bridges.AbstractBridge},
-)
+) where {T}
     push!(model.bridge_types, BridgeType)
     # The type of `backend(model)` is not type-stable, so we use a function
     # barrier (`_moi_add_bridge`) to improve performance.
-    _moi_add_bridge(backend(model), BridgeType)
+    _moi_add_bridge(backend(model), BridgeType, T)
     return
 end
 
 """
-     print_bridge_graph([io::IO,] model::Model)
+     print_bridge_graph([io::IO,] model::GenericModel)
 
 Print the hyper-graph containing all variable, constraint, and objective types
 that could be obtained by bridging the variables, constraints, and objectives
@@ -477,9 +503,9 @@ For more information, see Legat, B., Dowson, O., Garcia, J., and Lubin, M.
 (2020).  "MathOptInterface: a data structure for mathematical optimization
 problems." URL: [https://arxiv.org/abs/2002.03447](https://arxiv.org/abs/2002.03447)
 """
-print_bridge_graph(model::Model) = print_bridge_graph(Base.stdout, model)
+print_bridge_graph(model::GenericModel) = print_bridge_graph(Base.stdout, model)
 
-function print_bridge_graph(io::IO, model::Model)
+function print_bridge_graph(io::IO, model::GenericModel)
     # The type of `backend(model)` is not type-stable, so we use a function
     # barrier (`_moi_print_bridge_graph`) to improve performance.
     return _moi_print_bridge_graph(io, backend(model))
@@ -501,14 +527,14 @@ function _moi_print_bridge_graph(::IO, ::MOI.ModelLike)
 end
 
 """
-    empty!(model::Model)::Model
+    empty!(model::GenericModel)::GenericModel
 
 Empty the model, that is, remove all variables, constraints and model
 attributes but not optimizer attributes. Always return the argument.
 
 Note: removes extensions data.
 """
-function Base.empty!(model::Model)::Model
+function Base.empty!(model::GenericModel)::GenericModel
     # The method changes the Model object to, basically, the state it was when
     # created (if the optimizer was already pre-configured). The exceptions
     # are:
@@ -528,13 +554,13 @@ function Base.empty!(model::Model)::Model
 end
 
 """
-    isempty(model::Model)
+    isempty(model::GenericModel)
 
 Verifies whether the model is empty, that is, whether the MOI backend
 is empty and whether the model is in the same state as at its creation
 apart from optimizer attributes.
 """
-function Base.isempty(model::Model)
+function Base.isempty(model::GenericModel)
     return MOI.is_empty(model.moi_backend) &&
            isempty(model.shapes) &&
            model.nlp_model === nothing &&
@@ -544,7 +570,7 @@ function Base.isempty(model::Model)
 end
 
 """
-    object_dictionary(model::Model)
+    object_dictionary(model::GenericModel)
 
 Return the dictionary that maps the symbol name of a variable, constraint, or
 expression to the corresponding object.
@@ -555,10 +581,10 @@ For example, `@variable(model, x[1:2, 1:2])` registers the array of variables
 
 This method should be defined for any subtype of `AbstractModel`.
 """
-object_dictionary(model::Model) = model.obj_dict
+object_dictionary(model::GenericModel) = model.obj_dict
 
 """
-    unregister(model::Model, key::Symbol)
+    unregister(model::GenericModel, key::Symbol)
 
 Unregister the name `key` from `model` so that a new variable, constraint, or
 expression can be created with the same key.
@@ -652,11 +678,11 @@ function Base.haskey(model::AbstractModel, name::Symbol)
 end
 
 """
-    set_optimize_hook(model::Model, f::Union{Function,Nothing})
+    set_optimize_hook(model::GenericModel, f::Union{Function,Nothing})
 
 Set the function `f` as the optimize hook for `model`.
 
-`f` should have a signature `f(model::Model; kwargs...)`, where the `kwargs` are
+`f` should have a signature `f(model::GenericModel; kwargs...)`, where the `kwargs` are
 those passed to [`optimize!`](@ref).
 
 ## Notes
@@ -670,7 +696,7 @@ those passed to [`optimize!`](@ref).
 
 ```julia
 model = Model()
-function my_hook(model::Model; kwargs...)
+function my_hook(model::GenericModel; kwargs...)
     print(kwargs)
     return optimize!(model; ignore_optimize_hook = true)
 end
@@ -678,7 +704,7 @@ set_optimize_hook(model, my_hook)
 optimize!(model; test_arg = true)
 ```
 """
-set_optimize_hook(model::Model, f) = (model.optimize_hook = f)
+set_optimize_hook(model::GenericModel, f) = (model.optimize_hook = f)
 
 """
     AbstractJuMPScalar <: MutableArithmetics.AbstractMutable

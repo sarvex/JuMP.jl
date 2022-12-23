@@ -14,8 +14,8 @@ end
 
 _throw_write_to_file_explanatory_message(err) = rethrow(err)
 
-function _copy_to_bridged_model(f::Function, model::Model)
-    inner = MOI.instantiate(f; with_bridge_type = Float64)
+function _copy_to_bridged_model(f::Function, model::GenericModel{T}) where {T}
+    inner = MOI.instantiate(f; with_bridge_type = T)
     try
         MOI.copy_to(inner, model)
     catch err
@@ -30,7 +30,7 @@ end
 
 """
     write_to_file(
-        model::Model,
+        model::GenericModel,
         filename::String;
         format::MOI.FileFormats.FileFormat = MOI.FileFormats.FORMAT_AUTOMATIC,
         kwargs...,
@@ -44,7 +44,7 @@ If the filename ends in `.bz2`, it will be compressed using BZip2.
 Other `kwargs` are passed to the `Model` constructor of the chosen format.
 """
 function write_to_file(
-    model::Model,
+    model::GenericModel,
     filename::String;
     format::MOI.FileFormats.FileFormat = MOI.FileFormats.FORMAT_AUTOMATIC,
     kwargs...,
@@ -63,7 +63,7 @@ end
 """
     Base.write(
         io::IO,
-        model::Model;
+        model::GenericModel;
         format::MOI.FileFormats.FileFormat = MOI.FileFormats.FORMAT_MOF,
         kwargs...,
     )
@@ -74,7 +74,7 @@ Other `kwargs` are passed to the `Model` constructor of the chosen format.
 """
 function Base.write(
     io::IO,
-    model::Model;
+    model::GenericModel;
     format::MOI.FileFormats.FileFormat = MOI.FileFormats.FORMAT_MOF,
     kwargs...,
 )
@@ -118,7 +118,7 @@ end
 """
     Base.read(
         io::IO,
-        ::Type{Model};
+        ::Type{<:GenericModel};
         format::MOI.FileFormats.FileFormat,
         kwargs...,
     )
@@ -129,7 +129,7 @@ Other `kwargs` are passed to the `Model` constructor of the chosen format.
 """
 function Base.read(
     io::IO,
-    ::Type{Model};
+    ::Type{<:GenericModel};
     format::MOI.FileFormats.FileFormat,
     kwargs...,
 )
